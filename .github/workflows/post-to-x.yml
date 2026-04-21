@@ -1,0 +1,49 @@
+name: Post To X
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 08:00-08:50 JST
+    - cron: "*/10 23 * * *"
+    # 09:00-23:50 JST
+    - cron: "*/10 0-14 * * *"
+
+concurrency:
+  group: post-to-x
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODELS: ${{ vars.GEMINI_MODELS }}
+      X_API_KEY: ${{ secrets.X_API_KEY }}
+      X_API_SECRET: ${{ secrets.X_API_SECRET }}
+      X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+      X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
+      ARTICLE_SELECTION_MODE: ${{ vars.ARTICLE_SELECTION_MODE }}
+      POST_WINDOW_START_HOUR: ${{ vars.POST_WINDOW_START_HOUR }}
+      POST_WINDOW_END_HOUR: ${{ vars.POST_WINDOW_END_HOUR }}
+      MIN_POSTS_PER_DAY: ${{ vars.MIN_POSTS_PER_DAY }}
+      MAX_POSTS_PER_DAY: ${{ vars.MAX_POSTS_PER_DAY }}
+      POST_CHECK_INTERVAL_MINUTES: ${{ vars.POST_CHECK_INTERVAL_MINUTES }}
+      MIN_GAP_MINUTES: ${{ vars.MIN_GAP_MINUTES }}
+      POST_SCHEDULE_SEED: ${{ secrets.POST_SCHEDULE_SEED }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run auto post
+        run: python main.py
