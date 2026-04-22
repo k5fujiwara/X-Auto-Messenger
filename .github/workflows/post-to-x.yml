@@ -30,7 +30,9 @@ jobs:
       MAX_POSTS_PER_DAY: ${{ vars.MAX_POSTS_PER_DAY }}
       POST_CHECK_INTERVAL_MINUTES: ${{ vars.POST_CHECK_INTERVAL_MINUTES }}
       MIN_GAP_MINUTES: ${{ vars.MIN_GAP_MINUTES }}
+      POST_SLOT_GRACE_MINUTES: ${{ vars.POST_SLOT_GRACE_MINUTES }}
       POST_SCHEDULE_SEED: ${{ secrets.POST_SCHEDULE_SEED }}
+      X_POST_JITTER_SECONDS_MAX: "0"
 
     steps:
       - name: Checkout repository

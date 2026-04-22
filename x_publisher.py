@@ -2,6 +2,7 @@ import logging
 import os
 import random
 import time
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Optional
 
@@ -17,6 +18,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+UTC = timezone.utc
 
 
 @dataclass
@@ -26,6 +28,18 @@ class PublishResult:
     message: Optional[str] = None
     parent_tweet_id: Optional[str] = None
     reply_tweet_id: Optional[str] = None
+
+
+def _get_int_env(name: str, default: int) -> int:
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return default
+
+    try:
+        return int(raw_value)
+    except ValueError:
+        logger.warning("Invalid integer for %s: %s. Falling back to %s.", name, raw_value, default)
+        return default
 
 
 def _build_x_client() -> tweepy.Client:
@@ -55,6 +69,74 @@ def _build_x_client() -> tweepy.Client:
     )
 
 
+def _get_authenticated_user_id(client: tweepy.Client) -> Optional[str]:
+    try:
+        response = client.get_me(user_auth=True)
+        user_data = response.data if response else None
+        return str(user_data.id) if user_data and getattr(user_data, "id", None) else None
+    except Exception as exc:
+        logger.warning("Failed to resolve authenticated X user: %s", exc)
+        return None
+
+
+def _get_recent_user_tweets(max_results: int = 25):
+    client = _build_x_client()
+    user_id = _get_authenticated_user_id(client)
+    if not user_id:
+        return []
+
+    try:
+        response = client.get_users_tweets(
+            id=user_id,
+            max_results=max_results,
+            tweet_fields=["created_at"],
+            user_auth=True,
+        )
+        return response.data or []
+    except Exception as exc:
+        logger.warning("Failed to fetch recent X posts for duplicate check: %s", exc)
+        return []
+
+
+def has_recent_feed_reply(lookback_minutes: int = 45, known_domains: Optional[list[str]] = None) -> bool:
+    domains = known_domains or ["info-study.com", "note.com"]
+    cutoff = datetime.now(UTC) - timedelta(minutes=max(1, lookback_minutes))
+
+    for tweet in _get_recent_user_tweets():
+        created_at = getattr(tweet, "created_at", None)
+        if created_at and created_at < cutoff:
+            continue
+
+        text = (getattr(tweet, "text", "") or "").strip()
+        if not text:
+            continue
+
+        normalized = text.lower()
+        if normalized.startswith("http") and any(domain in normalized for domain in domains):
+            return True
+
+    return False
+
+
+def was_url_recently_posted(url: str, lookback_hours: int = 72) -> bool:
+    if not url or not url.strip():
+        return False
+
+    cutoff = datetime.now(UTC) - timedelta(hours=max(1, lookback_hours))
+    normalized_url = url.strip().lower()
+
+    for tweet in _get_recent_user_tweets(max_results=50):
+        created_at = getattr(tweet, "created_at", None)
+        if created_at and created_at < cutoff:
+            continue
+
+        text = (getattr(tweet, "text", "") or "").strip().lower()
+        if normalized_url and normalized_url in text:
+            return True
+
+    return False
+
+
 def _is_text_too_long_error(message: str) -> bool:
     normalized = (message or "").lower()
     return any(
@@ -81,9 +163,13 @@ def publish_to_x_detailed(text: str, url: str, apply_jitter: bool = True) -> Pub
         return PublishResult(success=False, error_type="empty_url", message="Reply URL is empty.")
 
     if apply_jitter:
-        wait_seconds = random.randint(0, 900)
-        logger.info("Sleeping %s seconds before posting to X.", wait_seconds)
-        time.sleep(wait_seconds)
+        jitter_max_seconds = max(0, _get_int_env("X_POST_JITTER_SECONDS_MAX", 900))
+        if jitter_max_seconds > 0:
+            wait_seconds = random.randint(0, jitter_max_seconds)
+            logger.info("Sleeping %s seconds before posting to X.", wait_seconds)
+            time.sleep(wait_seconds)
+        else:
+            logger.info("Skipping X post jitter because X_POST_JITTER_SECONDS_MAX=%s.", jitter_max_seconds)
 
     try:
         client = _build_x_client()

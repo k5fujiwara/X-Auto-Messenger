@@ -13,7 +13,7 @@ import feedparser
 import google.generativeai as genai
 
 from env_loader import load_env_file
-from x_publisher import publish_to_x_detailed
+from x_publisher import has_recent_feed_reply, publish_to_x_detailed, was_url_recently_posted
 
 
 load_env_file()
@@ -42,6 +42,7 @@ DEFAULT_MIN_POSTS_PER_DAY = 4
 DEFAULT_MAX_POSTS_PER_DAY = 6
 DEFAULT_POST_CHECK_INTERVAL_MINUTES = 10
 DEFAULT_MIN_GAP_MINUTES = 90
+DEFAULT_POST_SLOT_GRACE_MINUTES = 30
 STATE_FILE = Path(__file__).with_name(".article_selection_state.json")
 HASHTAG_HINTS = [
     "#教育",
@@ -72,7 +73,16 @@ class PostingSchedule:
     start_hour: int
     end_hour: int
     check_interval_minutes: int
+    min_gap_minutes: int
     slot_indexes: list[int]
+
+
+@dataclass
+class PostingOpportunity:
+    slot_index: int
+    slot_time_label: str
+    grace_minutes: int
+    minutes_since_slot: int
 
 
 def _clean_text(value: str) -> str:
@@ -250,6 +260,7 @@ def _build_daily_posting_schedule(target_date: date) -> PostingSchedule:
         start_hour=start_hour,
         end_hour=end_hour,
         check_interval_minutes=check_interval_minutes,
+        min_gap_minutes=min_gap_minutes,
         slot_indexes=slot_indexes,
     )
 
@@ -261,7 +272,7 @@ def _format_slot_time(slot_index: int, start_hour: int, check_interval_minutes: 
     return f"{hour:02d}:{minute:02d}"
 
 
-def should_post_now(now: Optional[datetime] = None) -> bool:
+def get_posting_opportunity(now: Optional[datetime] = None) -> Optional[PostingOpportunity]:
     current_time = now.astimezone(JST) if now else datetime.now(JST)
     schedule = _build_daily_posting_schedule(current_time.date())
     scheduled_times = [
@@ -279,15 +290,47 @@ def should_post_now(now: Optional[datetime] = None) -> bool:
     window_end_minutes = schedule.end_hour * 60
     if current_minutes < window_start_minutes or current_minutes >= window_end_minutes:
         logger.info("Current JST time %s is outside the posting window.", current_time.strftime("%H:%M"))
-        return False
+        return None
 
-    current_slot = (current_minutes - window_start_minutes) // schedule.check_interval_minutes
-    if current_slot not in schedule.slot_indexes:
-        logger.info("Current JST time %s is not one of today's posting slots.", current_time.strftime("%H:%M"))
-        return False
+    configured_grace_minutes = _get_int_env("POST_SLOT_GRACE_MINUTES", DEFAULT_POST_SLOT_GRACE_MINUTES)
+    grace_minutes = max(schedule.check_interval_minutes, configured_grace_minutes)
+    if schedule.min_gap_minutes > 1:
+        grace_minutes = min(grace_minutes, schedule.min_gap_minutes - 1)
 
-    logger.info("Current JST time %s matched today's posting slot.", current_time.strftime("%H:%M"))
-    return True
+    matched_slot_index = None
+    minutes_since_slot = None
+    for slot_index in schedule.slot_indexes:
+        slot_minutes = window_start_minutes + (slot_index * schedule.check_interval_minutes)
+        elapsed = current_minutes - slot_minutes
+        if 0 <= elapsed < grace_minutes:
+            matched_slot_index = slot_index
+            minutes_since_slot = elapsed
+
+    if matched_slot_index is None or minutes_since_slot is None:
+        logger.info(
+            "Current JST time %s did not match any posting slot within the %s-minute grace window.",
+            current_time.strftime("%H:%M"),
+            grace_minutes,
+        )
+        return None
+
+    slot_time_label = _format_slot_time(
+        matched_slot_index,
+        schedule.start_hour,
+        schedule.check_interval_minutes,
+    )
+    logger.info(
+        "Current JST time %s matched posting slot %s within the %s-minute grace window.",
+        current_time.strftime("%H:%M"),
+        slot_time_label,
+        grace_minutes,
+    )
+    return PostingOpportunity(
+        slot_index=matched_slot_index,
+        slot_time_label=slot_time_label,
+        grace_minutes=grace_minutes,
+        minutes_since_slot=minutes_since_slot,
+    )
 
 
 def _get_gemini_model_names() -> list[str]:
@@ -514,8 +557,17 @@ def publish_with_hashtag_retry(body: str, hashtags: list[str], url: str) -> bool
 
 
 def run() -> bool:
-    if not should_post_now():
+    posting_opportunity = get_posting_opportunity()
+    if not posting_opportunity:
         logger.info("Skipping this run because no post is scheduled for the current JST slot.")
+        return True
+
+    duplicate_lookback_minutes = posting_opportunity.minutes_since_slot + posting_opportunity.grace_minutes
+    if has_recent_feed_reply(lookback_minutes=duplicate_lookback_minutes):
+        logger.info(
+            "Skipping slot %s because a recent feed URL reply was already detected.",
+            posting_opportunity.slot_time_label,
+        )
         return True
 
     articles = fetch_articles()
@@ -527,6 +579,10 @@ def run() -> bool:
     if not article:
         logger.error("No article was selected for posting.")
         return False
+
+    if was_url_recently_posted(article.url):
+        logger.info("Skipping posting because this article URL appears to have been posted recently: %s", article.url)
+        return True
 
     generated_post = generate_x_summary(article)
     if not generated_post:
