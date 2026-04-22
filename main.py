@@ -365,12 +365,27 @@ def _build_gemini_model(model_name: str):
     return genai.GenerativeModel(model_name)
 
 
-def _sanitize_generated_text(text: str) -> str:
-    cleaned = text.strip()
+def _sanitize_generated_text(text: str, preserve_line_breaks: bool = False) -> str:
+    cleaned = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     cleaned = re.sub(r"https?://\S+", "", cleaned)
     cleaned = re.sub(r"#[^\s#]+", "", cleaned)
-    cleaned = cleaned.replace("\n", " ")
     cleaned = cleaned.strip(" 　\"'")
+
+    if preserve_line_breaks:
+        lines = []
+        previous_blank = False
+        for raw_line in cleaned.split("\n"):
+            line = re.sub(r"\s+", " ", raw_line).strip(" 　\"'")
+            if not line:
+                if not previous_blank:
+                    lines.append("")
+                previous_blank = True
+                continue
+            lines.append(line)
+            previous_blank = False
+        return "\n".join(lines).strip()
+
+    cleaned = cleaned.replace("\n", " ")
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip()
 
@@ -388,7 +403,9 @@ def _extract_json_block(text: str) -> str:
 
 
 def _normalize_hashtag(tag: str) -> str:
-    normalized = _sanitize_generated_text(tag)
+    normalized = (tag or "").strip()
+    normalized = normalized.replace("\n", " ")
+    normalized = normalized.strip(" 　\"'")
     normalized = normalized.replace("＃", "#")
     normalized = normalized.replace(" ", "")
     if not normalized:
@@ -399,10 +416,83 @@ def _normalize_hashtag(tag: str) -> str:
     return normalized if len(normalized) > 1 else ""
 
 
+def _split_long_line(text: str, target_length: int = 28) -> list[str]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+
+    lines = []
+    remaining = stripped
+    while len(remaining) > target_length:
+        split_at = -1
+        for marker in ("。", "！", "？", "!", "?", "、", ","):
+            marker_index = remaining.rfind(marker, 0, target_length + 1)
+            if marker_index >= 0:
+                split_at = max(split_at, marker_index + 1)
+        if split_at <= 0:
+            split_at = target_length
+        lines.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+
+    if remaining:
+        lines.append(remaining)
+    return lines
+
+
+def _format_body_layout(body_text: str) -> str:
+    sanitized = _sanitize_generated_text(body_text, preserve_line_breaks=True)
+    if not sanitized:
+        return ""
+
+    candidate_lines = []
+    for block in sanitized.splitlines():
+        if not block.strip():
+            continue
+        candidate_lines.extend(_split_long_line(block))
+
+    if not candidate_lines:
+        return ""
+
+    return "\n".join(candidate_lines[:3]).strip()
+
+
+def _format_hashtag_block(hashtags: list[str]) -> str:
+    if not hashtags:
+        return ""
+
+    first_line = " ".join(hashtags[:3])
+    second_line = " ".join(hashtags[3:6])
+    if second_line:
+        return f"{first_line}\n{second_line}"
+    return first_line
+
+
 def _build_post_text(body_text: str, hashtags: list[str]) -> str:
-    body = _sanitize_generated_text(body_text)
-    hashtag_text = " ".join(hashtags)
-    return f"{body} {hashtag_text}".strip() if hashtag_text else body
+    body = _format_body_layout(body_text)
+    hashtag_block = _format_hashtag_block(hashtags)
+    if body and hashtag_block:
+        return f"{body}\n\n{hashtag_block}".strip()
+    return body or hashtag_block
+
+
+def _merge_hashtags_with_fallback(generated_hashtags: list[str]) -> list[str]:
+    hashtags = []
+    seen = set()
+
+    for tag in generated_hashtags:
+        if tag and tag not in seen:
+            hashtags.append(tag)
+            seen.add(tag)
+
+    for tag in HASHTAG_HINTS:
+        normalized = _normalize_hashtag(tag)
+        if normalized and normalized not in seen:
+            hashtags.append(normalized)
+            seen.add(normalized)
+        if len(hashtags) >= 6:
+            break
+
+    return hashtags[:6]
 
 
 def _parse_generated_post(response_text: str) -> Optional[GeneratedPost]:
@@ -415,27 +505,33 @@ def _parse_generated_post(response_text: str) -> Optional[GeneratedPost]:
         logger.debug("Gemini raw response: %s", response_text)
         return None
 
-    body = _sanitize_generated_text(str(payload.get("body", "")))
+    body = _sanitize_generated_text(str(payload.get("body", "")), preserve_line_breaks=True)
     raw_hashtags = payload.get("hashtags", [])
     if not isinstance(raw_hashtags, list):
         logger.error("Gemini response hashtags field is not a list.")
         return None
 
-    hashtags = []
+    generated_hashtags = []
     seen = set()
     for tag in raw_hashtags:
         normalized = _normalize_hashtag(str(tag))
         if not normalized or normalized in seen:
             continue
-        hashtags.append(normalized)
+        generated_hashtags.append(normalized)
         seen.add(normalized)
 
     if not body:
         logger.error("Gemini response body is empty.")
         return None
 
-    if len(hashtags) < 5:
-        logger.error("Gemini returned fewer than 5 usable hashtags.")
+    hashtags = _merge_hashtags_with_fallback(generated_hashtags)
+    if len(generated_hashtags) < 5:
+        logger.warning(
+            "Gemini returned only %s usable hashtags. Filled the remainder with fallback hashtags.",
+            len(generated_hashtags),
+        )
+    if not hashtags:
+        logger.error("No usable hashtags were available after fallback.")
         return None
 
     return GeneratedPost(body=body, hashtags=hashtags[:6])
@@ -458,6 +554,8 @@ def generate_x_summary(article: Article) -> Optional[GeneratedPost]:
 
 出力ルール:
 - 本文は70〜95文字を目安にする
+- 本文は2〜3行で、1行ごとに短く読みやすくする
+- 改行を使って、視線が止まりやすいレイアウトにする
 - URLは含めない
 - ハッシュタグは5〜6個作る
 - ハッシュタグは検索されやすい一般的な語を優先する
@@ -466,7 +564,7 @@ def generate_x_summary(article: Article) -> Optional[GeneratedPost]:
 - 余計な前置きや説明は不要
 - 必ずJSONだけを返す
 - JSON形式は次の通り:
-  {{"body":"本文","hashtags":["#タグ1","#タグ2","#タグ3","#タグ4","#タグ5"]}}
+  {{"body":"1行目\\n2行目\\n3行目","hashtags":["#タグ1","#タグ2","#タグ3","#タグ4","#タグ5"]}}
 
 参考ハッシュタグ例:
 {hashtag_examples}

@@ -112,7 +112,7 @@ def has_recent_feed_reply(lookback_minutes: int = 45, known_domains: Optional[li
             continue
 
         normalized = text.lower()
-        if normalized.startswith("http") and any(domain in normalized for domain in domains):
+        if any(domain in normalized for domain in domains):
             return True
 
     return False
@@ -153,6 +153,10 @@ def _is_text_too_long_error(message: str) -> bool:
     )
 
 
+def _build_reply_text(url: str) -> str:
+    return f"▼詳細はこちら\n\n{url.strip()}"
+
+
 def publish_to_x_detailed(text: str, url: str, apply_jitter: bool = True) -> PublishResult:
     if not text or not text.strip():
         logger.error("Parent post text is empty.")
@@ -189,9 +193,11 @@ def publish_to_x_detailed(text: str, url: str, apply_jitter: bool = True) -> Pub
 
         logger.info("Parent tweet posted successfully. tweet_id=%s", parent_tweet_id)
 
+        reply_text = _build_reply_text(url)
+
         logger.info("Posting reply tweet with URL.")
         reply_response = client.create_tweet(
-            text=url.strip(),
+            text=reply_text,
             in_reply_to_tweet_id=parent_tweet_id,
         )
         reply_data = reply_response.data or {}
