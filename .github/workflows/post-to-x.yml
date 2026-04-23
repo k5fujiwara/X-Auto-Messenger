@@ -3,10 +3,10 @@ name: Post To X
 on:
   workflow_dispatch:
   schedule:
-    # 08:00-08:50 JST
-    - cron: "*/10 23 * * *"
-    # 09:00-23:50 JST
-    - cron: "*/10 0-14 * * *"
+    # 08:00-08:55 JST
+    - cron: "*/5 23 * * *"
+    # 09:00-23:55 JST
+    - cron: "*/5 0-14 * * *"
 
 concurrency:
   group: post-to-x
