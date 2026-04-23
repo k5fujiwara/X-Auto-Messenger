@@ -29,10 +29,8 @@ FEEDS = {
     "note": "https://note.com/k5fujiwara/rss",
 }
 DEFAULT_SELECTION_MODE = "random"
-DEFAULT_GEMINI_MODEL = "gemini-3.1-pro-preview"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
 DEFAULT_GEMINI_MODELS = [
-    "gemini-3.1-pro-preview",
-    "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
 ]
 JST = timezone(timedelta(hours=9))
@@ -42,7 +40,7 @@ DEFAULT_MIN_POSTS_PER_DAY = 6
 DEFAULT_MAX_POSTS_PER_DAY = 9
 DEFAULT_POST_CHECK_INTERVAL_MINUTES = 5
 DEFAULT_MIN_GAP_MINUTES = 60
-DEFAULT_POST_SLOT_GRACE_MINUTES = 20
+DEFAULT_POST_SLOT_GRACE_MINUTES = 30
 STATE_FILE = Path(__file__).with_name(".article_selection_state.json")
 HASHTAG_HINTS = [
     "#教育",
@@ -654,38 +652,41 @@ def publish_with_hashtag_retry(body: str, hashtags: list[str], url: str) -> bool
     return False
 
 
-def run() -> bool:
+def run() -> str:
     posting_opportunity = get_posting_opportunity()
     if not posting_opportunity:
-        logger.warning("Skipping this run because no post is scheduled for the current JST slot.")
-        return False
+        logger.info("RESULT: SKIPPED - no post is scheduled for the current JST slot.")
+        return "skipped"
 
     duplicate_lookback_minutes = posting_opportunity.minutes_since_slot + posting_opportunity.grace_minutes
     if has_recent_feed_reply(lookback_minutes=duplicate_lookback_minutes):
-        logger.warning(
-            "Skipping slot %s because a recent feed URL reply was already detected.",
+        logger.info(
+            "RESULT: SKIPPED - slot %s already appears to have been posted recently.",
             posting_opportunity.slot_time_label,
         )
-        return False
+        return "skipped"
 
     articles = fetch_articles()
     if not articles:
-        return False
+        logger.error("RESULT: ERROR - failed to fetch articles.")
+        return "error"
 
     selection_mode = os.environ.get("ARTICLE_SELECTION_MODE", DEFAULT_SELECTION_MODE)
     article = choose_article(articles, selection_mode)
     if not article:
         logger.error("No article was selected for posting.")
-        return False
+        logger.error("RESULT: ERROR - no article was selected.")
+        return "error"
 
     if was_url_recently_posted(article.url):
-        logger.warning("Skipping posting because this article URL appears to have been posted recently: %s", article.url)
-        return False
+        logger.info("RESULT: SKIPPED - this article URL appears to have been posted recently: %s", article.url)
+        return "skipped"
 
     generated_post = generate_x_summary(article)
     if not generated_post:
         logger.error("Summary generation failed. Posting aborted.")
-        return False
+        logger.error("RESULT: ERROR - failed to generate summary.")
+        return "error"
 
     logger.info("Publishing generated summary to X. source=%s url=%s", article.source, article.url)
     result = publish_with_hashtag_retry(
@@ -695,11 +696,13 @@ def run() -> bool:
     )
     if not result:
         logger.error("Posting to X failed.")
-        return False
+        logger.error("RESULT: ERROR - posting to X failed.")
+        return "error"
 
     logger.info("Posting flow completed successfully.")
-    return True
+    logger.info("RESULT: POSTED")
+    return "posted"
 
 
 if __name__ == "__main__":
-    raise SystemExit(0 if run() else 1)
+    raise SystemExit(0 if run() != "error" else 1)

@@ -47,7 +47,7 @@ X_ACCESS_SECRET="..."
 X_BEARER_TOKEN="..."
 
 GEMINI_API_KEY="..."
-GEMINI_MODELS="gemini-3.1-pro-preview,gemini-2.5-flash,gemini-2.5-flash-lite"
+GEMINI_MODELS="gemini-2.5-flash-lite"
 
 ARTICLE_SELECTION_MODE="random"
 POST_WINDOW_START_HOUR="8"
@@ -56,7 +56,7 @@ MIN_POSTS_PER_DAY="6"
 MAX_POSTS_PER_DAY="9"
 POST_CHECK_INTERVAL_MINUTES="5"
 MIN_GAP_MINUTES="60"
-POST_SLOT_GRACE_MINUTES="20"
+POST_SLOT_GRACE_MINUTES="30"
 POST_SCHEDULE_SEED="change-me"
 ```
 
@@ -87,7 +87,7 @@ POST_SCHEDULE_SEED="change-me"
 python main.py
 ```
 
-`main.py` は現在時刻がその日の投稿スロットに当たっている時だけ投稿します。投稿されなかった回は終了コード `1` で終了するため、GitHub Actions 上では success になりません。
+`main.py` は現在時刻がその日の投稿スロットに当たっている時だけ投稿します。投稿しなかった回は `SKIPPED` として正常終了し、実際の障害があった時だけ終了コード `1` になります。
 
 Gemini の利用可能モデル確認:
 
